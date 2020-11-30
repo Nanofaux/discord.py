@@ -31,7 +31,6 @@ import unicodedata
 from base64 import b64encode
 from bisect import bisect_left
 import datetime
-from email.utils import parsedate_to_datetime
 import functools
 from inspect import isawaitable as _isawaitable
 from operator import attrgetter
@@ -40,7 +39,6 @@ import re
 import warnings
 
 from .errors import InvalidArgument
-from .object import Object
 
 DISCORD_EPOCH = 1420070400000
 MAX_ASYNCIO_SECONDS = 3456000
@@ -482,7 +480,7 @@ _MARKDOWN_ESCAPE_SUBREGEX = '|'.join(r'\{0}(?=([\s\S]*((?<!\{0})\{0})))'.format(
 
 _MARKDOWN_ESCAPE_COMMON = r'^>(?:>>)?\s|\[.+\]\(.+\)'
 
-_MARKDOWN_ESCAPE_REGEX = re.compile(r'(?P<markdown>%s|%s)' % (_MARKDOWN_ESCAPE_SUBREGEX, _MARKDOWN_ESCAPE_COMMON))
+_MARKDOWN_ESCAPE_REGEX = re.compile(r'(?P<markdown>%s|%s)' % (_MARKDOWN_ESCAPE_SUBREGEX, _MARKDOWN_ESCAPE_COMMON), re.MULTILINE)
 
 def escape_markdown(text, *, as_needed=False, ignore_links=True):
     r"""A helper function that escapes Discord's markdown.
@@ -521,7 +519,7 @@ def escape_markdown(text, *, as_needed=False, ignore_links=True):
         regex = r'(?P<markdown>[_\\~|\*`]|%s)' % _MARKDOWN_ESCAPE_COMMON
         if ignore_links:
             regex = '(?:%s|%s)' % (url_regex, regex)
-        return re.sub(regex, replacement, text)
+        return re.sub(regex, replacement, text, 0, re.MULTILINE)
     else:
         text = re.sub(r'\\', r'\\\\', text)
         return _MARKDOWN_ESCAPE_REGEX.sub(r'\\\1', text)
@@ -532,6 +530,12 @@ def escape_mentions(text):
     .. note::
 
         This does not include channel mentions.
+
+    .. note::
+
+        For more granular control over what mentions should be escaped
+        within messages, refer to the :class:`~discord.AllowedMentions`
+        class.
 
     Parameters
     -----------

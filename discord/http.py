@@ -33,7 +33,7 @@ import weakref
 
 import aiohttp
 
-from .errors import HTTPException, Forbidden, NotFound, LoginFailure, GatewayNotFound
+from .errors import HTTPException, Forbidden, NotFound, LoginFailure, DiscordServerError, GatewayNotFound
 from .gateway import DiscordClientWebSocketResponse
 from . import __version__, utils
 
@@ -241,6 +241,8 @@ class HTTPClient:
                             raise Forbidden(r, data)
                         elif r.status == 404:
                             raise NotFound(r, data)
+                        elif r.status == 503:
+                            raise DiscordServerError(r, data)
                         else:
                             raise HTTPException(r, data)
 
@@ -252,6 +254,9 @@ class HTTPClient:
                     raise
 
             # We've run out of retries, raise.
+            if r.status >= 500:
+                raise DiscordServerError(r, data)
+
             raise HTTPException(r, data)
 
     async def get_from_cdn(self, url):
@@ -337,7 +342,7 @@ class HTTPClient:
 
         return self.request(Route('POST', '/users/@me/channels'), json=payload)
 
-    def send_message(self, channel_id, content, *, tts=False, embed=None, nonce=None, allowed_mentions=None):
+    def send_message(self, channel_id, content, *, tts=False, embed=None, nonce=None, allowed_mentions=None, message_reference=None):
         r = Route('POST', '/channels/{channel_id}/messages', channel_id=channel_id)
         payload = {}
 
@@ -356,12 +361,15 @@ class HTTPClient:
         if allowed_mentions:
             payload['allowed_mentions'] = allowed_mentions
 
+        if message_reference:
+            payload['message_reference'] = message_reference
+
         return self.request(r, json=payload)
 
     def send_typing(self, channel_id):
         return self.request(Route('POST', '/channels/{channel_id}/typing', channel_id=channel_id))
 
-    def send_files(self, channel_id, *, files, content=None, tts=False, embed=None, nonce=None, allowed_mentions=None):
+    def send_files(self, channel_id, *, files, content=None, tts=False, embed=None, nonce=None, allowed_mentions=None, message_reference=None):
         r = Route('POST', '/channels/{channel_id}/messages', channel_id=channel_id)
         form = aiohttp.FormData()
 
@@ -374,6 +382,8 @@ class HTTPClient:
             payload['nonce'] = nonce
         if allowed_mentions:
             payload['allowed_mentions'] = allowed_mentions
+        if message_reference:
+            payload['message_reference'] = message_reference
 
         form.add_field('payload_json', utils.to_json(payload))
         if len(files) == 1:
@@ -494,7 +504,7 @@ class HTTPClient:
     def ban(self, user_id, guild_id, delete_message_days=1, reason=None):
         r = Route('PUT', '/guilds/{guild_id}/bans/{user_id}', guild_id=guild_id, user_id=user_id)
         params = {
-            'delete-message-days': delete_message_days,
+            'delete_message_days': delete_message_days,
         }
 
         if reason:
@@ -659,7 +669,7 @@ class HTTPClient:
 
     def get_template(self, code):
         return self.request(Route('GET', '/guilds/templates/{code}', code=code))
-    
+
     def create_from_template(self, code, name, region, icon):
         payload = {
             'name': name,
@@ -807,7 +817,7 @@ class HTTPClient:
         params = {
             'with_counts': int(with_counts)
         }
-        return self.request(Route('GET', '/invite/{invite_id}', invite_id=invite_id), params=params)
+        return self.request(Route('GET', '/invites/{invite_id}', invite_id=invite_id), params=params)
 
     def invites_from(self, guild_id):
         return self.request(Route('GET', '/guilds/{guild_id}/invites', guild_id=guild_id))
@@ -816,7 +826,7 @@ class HTTPClient:
         return self.request(Route('GET', '/channels/{channel_id}/invites', channel_id=channel_id))
 
     def delete_invite(self, invite_id, *, reason=None):
-        return self.request(Route('DELETE', '/invite/{invite_id}', invite_id=invite_id), reason=reason)
+        return self.request(Route('DELETE', '/invites/{invite_id}', invite_id=invite_id), reason=reason)
 
     # Role management
 

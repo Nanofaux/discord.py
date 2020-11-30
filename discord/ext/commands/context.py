@@ -238,7 +238,7 @@ class Context(discord.abc.Messageable):
 
     @property
     def voice_client(self):
-        r"""Optional[:class:`.VoiceClient`]: A shortcut to :attr:`.Guild.voice_client`\, if applicable."""
+        r"""Optional[:class:`.VoiceProtocol`]: A shortcut to :attr:`.Guild.voice_client`\, if applicable."""
         g = self.guild
         return g.voice_client if g else None
 
@@ -322,3 +322,8 @@ class Context(discord.abc.Messageable):
                 return None
         except CommandError as e:
             await cmd.on_help_command_error(self, e)
+
+    async def reply(self, content=None, **kwargs):
+        return await self.message.reply(content, **kwargs)
+
+    reply.__doc__ = discord.Message.reply.__doc__

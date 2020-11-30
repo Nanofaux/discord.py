@@ -45,7 +45,7 @@ class Loop:
     def __init__(self, coro, seconds, hours, minutes, count, reconnect, loop):
         self.coro = coro
         self.reconnect = reconnect
-        self.loop = loop or asyncio.get_event_loop()
+        self.loop = loop
         self.count = count
         self._current_loop = 0
         self._task = None
@@ -68,6 +68,7 @@ class Loop:
             raise ValueError('count must be greater than 0 or None.')
 
         self.change_interval(seconds=seconds, minutes=minutes, hours=hours)
+        self._last_iteration_failed = False
         self._last_iteration = None
         self._next_iteration = None
 
@@ -88,18 +89,22 @@ class Loop:
         backoff = ExponentialBackoff()
         await self._call_loop_function('before_loop')
         sleep_until = discord.utils.sleep_until
+        self._last_iteration_failed = False
         self._next_iteration = datetime.datetime.now(datetime.timezone.utc)
         try:
             await asyncio.sleep(0) # allows canceling in before_loop
             while True:
-                self._last_iteration = self._next_iteration
-                self._next_iteration = self._get_next_sleep_time()
+                if not self._last_iteration_failed:
+                    self._last_iteration = self._next_iteration
+                    self._next_iteration = self._get_next_sleep_time()
                 try:
                     await self.coro(*args, **kwargs)
+                    self._last_iteration_failed = False
                     now = datetime.datetime.now(datetime.timezone.utc)
                     if now > self._next_iteration:
                         self._next_iteration = now
                 except self._valid_exception as exc:
+                    self._last_iteration_failed = True
                     if not self.reconnect:
                         raise
                     await asyncio.sleep(backoff.delay())
@@ -181,6 +186,9 @@ class Loop:
 
         if self._injected is not None:
             args = (self._injected, *args)
+
+        if self.loop is None:
+            self.loop = asyncio.get_event_loop()
 
         self._task = self.loop.create_task(self._loop(*args, **kwargs))
         return self._task

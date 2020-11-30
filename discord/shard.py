@@ -34,7 +34,15 @@ from .state import AutoShardedConnectionState
 from .client import Client
 from .backoff import ExponentialBackoff
 from .gateway import *
-from .errors import ClientException, InvalidArgument, HTTPException, GatewayNotFound, ConnectionClosed
+from .errors import (
+    ClientException,
+    InvalidArgument,
+    HTTPException,
+    GatewayNotFound,
+    ConnectionClosed,
+    PrivilegedIntentsRequired,
+)
+
 from . import utils
 from .enums import Status
 
@@ -125,6 +133,9 @@ class Shard:
             return
 
         if isinstance(e, ConnectionClosed):
+            if e.code == 4014:
+                self._queue_put(EventItem(EventType.terminate, self, PrivilegedIntentsRequired(self.id)))
+                return
             if e.code != 1000:
                 self._queue_put(EventItem(EventType.close, self, e))
                 return
@@ -247,6 +258,16 @@ class ShardInfo:
         """:class:`float`: Measures latency between a HEARTBEAT and a HEARTBEAT_ACK in seconds for this shard."""
         return self._parent.ws.latency
 
+    def is_ws_ratelimited(self):
+        """:class:`bool`: Whether the websocket is currently rate limited.
+
+        This can be useful to know when deciding whether you should query members
+        using HTTP or via the gateway.
+
+        .. versionadded:: 1.6
+        """
+        return self._parent.ws.is_ratelimited()
+
 class AutoShardedClient(Client):
     """A client similar to :class:`Client` except it handles the complications
     of sharding for the user into a more manageable and transparent single
@@ -284,20 +305,22 @@ class AutoShardedClient(Client):
             elif not isinstance(self.shard_ids, (list, tuple)):
                 raise ClientException('shard_ids parameter must be a list or a tuple.')
 
-        self._connection = AutoShardedConnectionState(dispatch=self.dispatch,
-                                                      handlers=self._handlers, syncer=self._syncer,
-                                                      hooks=self._hooks, http=self.http, loop=self.loop, **kwargs)
-
         # instead of a single websocket, we have multiple
         # the key is the shard_id
         self.__shards = {}
         self._connection._get_websocket = self._get_websocket
+        self._connection._get_client = lambda: self
         self.__queue = asyncio.PriorityQueue()
 
     def _get_websocket(self, guild_id=None, *, shard_id=None):
         if shard_id is None:
             shard_id = (guild_id >> 22) % self.shard_count
         return self.__shards[shard_id].ws
+
+    def _get_state(self, **options):
+        return AutoShardedConnectionState(dispatch=self.dispatch,
+                                          handlers=self._handlers, syncer=self._syncer,
+                                          hooks=self._hooks, http=self.http, loop=self.loop, **options)
 
     @property
     def latency(self):
@@ -328,11 +351,12 @@ class AutoShardedClient(Client):
         else:
             return ShardInfo(parent, self.shard_count)
 
-    @utils.cached_property
+    @property
     def shards(self):
         """Mapping[int, :class:`ShardInfo`]: Returns a mapping of shard IDs to their respective info object."""
         return { shard_id: ShardInfo(parent, self.shard_count) for shard_id, parent in self.__shards.items() }
 
+    @utils.deprecated('Guild.chunk')
     async def request_offline_members(self, *guilds):
         r"""|coro|
 
@@ -346,6 +370,10 @@ class AutoShardedClient(Client):
         in the guild is larger than 250. You can check if a guild is large
         if :attr:`Guild.large` is ``True``.
 
+        .. warning::
+
+            This method is deprecated. Use :meth:`Guild.chunk` instead.
+
         Parameters
         -----------
         \*guilds: :class:`Guild`
@@ -354,15 +382,15 @@ class AutoShardedClient(Client):
         Raises
         -------
         InvalidArgument
-            If any guild is unavailable or not large in the collection.
+            If any guild is unavailable in the collection.
         """
-        if any(not g.large or g.unavailable for g in guilds):
+        if any(g.unavailable for g in guilds):
             raise InvalidArgument('An unavailable or non-large guild was passed.')
 
         _guilds = sorted(guilds, key=lambda g: g.shard_id)
         for shard_id, sub_guilds in itertools.groupby(_guilds, key=lambda g: g.shard_id):
-            sub_guilds = list(sub_guilds)
-            await self._connection.request_offline_members(sub_guilds, shard_id=shard_id)
+            for guild in sub_guilds:
+                await self._connection.chunk_guild(guild)
 
     async def launch_shard(self, gateway, shard_id, *, initial=False):
         try:
@@ -402,8 +430,11 @@ class AutoShardedClient(Client):
             item = await self.__queue.get()
             if item.type == EventType.close:
                 await self.close()
-                if isinstance(item.error, ConnectionClosed) and item.error.code != 1000:
-                    raise item.error
+                if isinstance(item.error, ConnectionClosed):
+                    if item.error.code != 1000:
+                        raise item.error
+                    if item.error.code == 4014:
+                        raise PrivilegedIntentsRequired(item.shard.id) from None
                 return
             elif item.type in (EventType.identify, EventType.resume):
                 await item.shard.reidentify(item.error)
@@ -498,3 +529,16 @@ class AutoShardedClient(Client):
 
             me.activities = activities
             me.status = status_enum
+
+    def is_ws_ratelimited(self):
+        """:class:`bool`: Whether the websocket is currently rate limited.
+
+        This can be useful to know when deciding whether you should query members
+        using HTTP or via the gateway.
+
+        This implementation checks if any of the shards are rate limited.
+        For more granular control, consider :meth:`ShardInfo.is_ws_ratelimited`.
+
+        .. versionadded:: 1.6
+        """
+        return any(shard.ws.is_ratelimited() for shard in self.__shards.values())

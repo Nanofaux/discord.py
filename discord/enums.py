@@ -51,7 +51,8 @@ __all__ = (
     'Theme',
     'WebhookType',
     'ExpireBehaviour',
-    'ExpireBehavior'
+    'ExpireBehavior',
+    'StickerType',
 )
 
 def _create_value_cls(name):
@@ -417,6 +418,7 @@ class ActivityType(Enum):
     listening = 2
     watching = 3
     custom = 4
+    competing = 5
 
     def __int__(self):
         return self.value
@@ -443,6 +445,11 @@ class ExpireBehaviour(Enum):
     kick = 1
 
 ExpireBehavior = ExpireBehaviour
+
+class StickerType(Enum):
+    png = 1
+    apng = 2
+    lottie = 3
 
 def try_enum(cls, val):
     """A function that tries to turn the value into enum ``cls``.

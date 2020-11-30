@@ -158,11 +158,11 @@ class TextChannel(discord.abc.Messageable, discord.abc.GuildChannel, Hashable):
         return [m for m in self.guild.members if self.permissions_for(m).read_messages]
 
     def is_nsfw(self):
-        """Checks if the channel is NSFW."""
+        """:class:`bool`: Checks if the channel is NSFW."""
         return self.nsfw
 
     def is_news(self):
-        """Checks if the channel is a news channel."""
+        """:class:`bool`: Checks if the channel is a news channel."""
         return self._type == ChannelType.news.value
 
     @property
@@ -757,7 +757,7 @@ class CategoryChannel(discord.abc.GuildChannel, Hashable):
         return ChannelType.category
 
     def is_nsfw(self):
-        """Checks if the category is NSFW."""
+        """:class:`bool`: Checks if the category is NSFW."""
         return self.nsfw
 
     async def clone(self, *, name=None, reason=None):
@@ -933,7 +933,7 @@ class StoreChannel(discord.abc.GuildChannel, Hashable):
     permissions_for.__doc__ = discord.abc.GuildChannel.permissions_for.__doc__
 
     def is_nsfw(self):
-        """Checks if the channel is NSFW."""
+        """:class:`bool`: Checks if the channel is NSFW."""
         return self.nsfw
 
     async def clone(self, *, name=None, reason=None):
@@ -1154,8 +1154,39 @@ class GroupChannel(discord.abc.Messageable, Hashable):
 
     @property
     def icon_url(self):
-        """:class:`Asset`: Returns the channel's icon asset if available."""
-        return Asset._from_icon(self._state, self, 'channel')
+        """:class:`Asset`: Returns the channel's icon asset if available.
+
+        This is equivalent to calling :meth:`icon_url_as` with
+        the default parameters ('webp' format and a size of 1024).
+        """
+        return self.icon_url_as()
+
+    def icon_url_as(self, *, format='webp', size=1024):
+        """Returns an :class:`Asset` for the icon the channel has.
+
+        The format must be one of 'webp', 'jpeg', 'jpg' or 'png'.
+        The size must be a power of 2 between 16 and 4096.
+
+        .. versionadded:: 2.0
+
+        Parameters
+        -----------
+        format: :class:`str`
+            The format to attempt to convert the icon to. Defaults to 'webp'.
+        size: :class:`int`
+            The size of the image to display.
+
+        Raises
+        ------
+        InvalidArgument
+            Bad image format passed to ``format`` or invalid ``size``.
+
+        Returns
+        --------
+        :class:`Asset`
+            The resulting CDN asset.
+        """
+        return Asset._from_icon(self._state, self, 'channel', format=format, size=size)
 
     @property
     def created_at(self):

@@ -25,18 +25,19 @@ DEALINGS IN THE SOFTWARE.
 """
 
 import abc
+import sys
 import copy
 import asyncio
 
 from .iterators import HistoryIterator
 from .context_managers import Typing
 from .enums import ChannelType
-from .errors import InvalidArgument, ClientException, HTTPException
+from .errors import InvalidArgument, ClientException
 from .permissions import PermissionOverwrite, Permissions
 from .role import Role
 from .invite import Invite
 from .file import File
-from .voice_client import VoiceClient
+from .voice_client import VoiceClient, VoiceProtocol
 from . import utils
 
 class _Undefined:
@@ -169,7 +170,7 @@ class _Overwrites:
         self.id = kwargs.pop('id')
         self.allow = kwargs.pop('allow', 0)
         self.deny = kwargs.pop('deny', 0)
-        self.type = kwargs.pop('type')
+        self.type = sys.intern(kwargs.pop('type'))
 
     def _asdict(self):
         return {
@@ -226,7 +227,7 @@ class GuildChannel:
             # not there somehow lol
             return
         else:
-            index = next((i for i, c in enumerate(channels) if c.position >= position), -1)
+            index = next((i for i, c in enumerate(channels) if c.position >= position), len(channels))
             # add ourselves at our designated position
             channels.insert(index, self)
 
@@ -274,7 +275,7 @@ class GuildChannel:
             await self._move(position, parent_id=parent_id, lock_permissions=lock_permissions, reason=reason)
 
         overwrites = options.get('overwrites', None)
-        if overwrites:
+        if overwrites is not None:
             perms = []
             for target, perm in overwrites.items():
                 if not isinstance(perm, PermissionOverwrite):
@@ -440,7 +441,7 @@ class GuildChannel:
         .. versionadded:: 1.3
         """
         category = self.guild.get_channel(self.category_id)
-        return bool(category and category._overwrites == self._overwrites)
+        return bool(category and category.overwrites == self.overwrites)
 
     def permissions_for(self, member):
         """Handles permission resolution for the current :class:`~discord.Member`.
@@ -679,6 +680,9 @@ class GuildChannel:
         Clones this channel. This creates a channel with the same properties
         as this channel.
 
+        You must have the :attr:`~discord.Permissions.manage_channels` permission to
+        do this.
+
         .. versionadded:: 1.1
 
         Parameters
@@ -695,13 +699,18 @@ class GuildChannel:
             You do not have the proper permissions to create this channel.
         ~discord.HTTPException
             Creating the channel failed.
+
+        Returns
+        --------
+        :class:`.abc.GuildChannel`
+            The channel that was created.
         """
         raise NotImplementedError
 
     async def create_invite(self, *, reason=None, **fields):
         """|coro|
 
-        Creates an instant invite.
+        Creates an instant invite from a text or voice channel.
 
         You must have the :attr:`~Permissions.create_instant_invite` permission to
         do this.
@@ -728,6 +737,9 @@ class GuildChannel:
         -------
         ~discord.HTTPException
             Invite creation failed.
+
+        ~discord.NotFound
+            The channel that was passed is a category or an invalid channel.
 
         Returns
         --------
@@ -790,7 +802,8 @@ class Messageable(metaclass=abc.ABCMeta):
 
     async def send(self, content=None, *, tts=False, embed=None, file=None,
                                           files=None, delete_after=None, nonce=None,
-                                          allowed_mentions=None):
+                                          allowed_mentions=None, reference=None,
+                                          mention_author=None):
         """|coro|
 
         Sends a message to the destination with the content given.
@@ -836,6 +849,19 @@ class Messageable(metaclass=abc.ABCMeta):
 
             .. versionadded:: 1.4
 
+        reference: Union[:class:`~discord.Message`, :class:`~discord.MessageReference`]
+            A reference to the :class:`~discord.Message` to which you are replying, this can be created using
+            :meth:`~discord.Message.to_reference` or passed directly as a :class:`~discord.Message`. You can control
+            whether this mentions the author of the referenced message using the :attr:`~discord.AllowedMentions.replied_user`
+            attribute of ``allowed_mentions`` or by setting ``mention_author``.
+
+            .. versionadded:: 1.6
+
+        mention_author: Optional[:class:`bool`]
+            If set, overrides the :attr:`~discord.AllowedMentions.replied_user` attribute of ``allowed_mentions``.
+
+            .. versionadded:: 1.6
+
         Raises
         --------
         ~discord.HTTPException
@@ -843,8 +869,10 @@ class Messageable(metaclass=abc.ABCMeta):
         ~discord.Forbidden
             You do not have the proper permissions to send the message.
         ~discord.InvalidArgument
-            The ``files`` list is not of the appropriate size or
-            you specified both ``file`` and ``files``.
+            The ``files`` list is not of the appropriate size,
+            you specified both ``file`` and ``files``,
+            or the ``reference`` object is not a :class:`~discord.Message`
+            or :class:`~discord.MessageReference`.
 
         Returns
         ---------
@@ -866,6 +894,16 @@ class Messageable(metaclass=abc.ABCMeta):
         else:
             allowed_mentions = state.allowed_mentions and state.allowed_mentions.to_dict()
 
+        if mention_author is not None:
+            allowed_mentions = allowed_mentions or {}
+            allowed_mentions['replied_user'] = bool(mention_author)
+
+        if reference is not None:
+            try:
+                reference = reference.to_message_reference_dict()
+            except AttributeError:
+                raise InvalidArgument('reference parameter must be Message or MessageReference') from None
+
         if file is not None and files is not None:
             raise InvalidArgument('cannot pass both file and files parameter to send()')
 
@@ -874,8 +912,9 @@ class Messageable(metaclass=abc.ABCMeta):
                 raise InvalidArgument('file parameter must be File')
 
             try:
-                data = await state.http.send_files(channel.id, files=[file],
-                                                   content=content, tts=tts, embed=embed, nonce=nonce)
+                data = await state.http.send_files(channel.id, files=[file], allowed_mentions=allowed_mentions,
+                                                   content=content, tts=tts, embed=embed, nonce=nonce,
+                                                   message_reference=reference)
             finally:
                 file.close()
 
@@ -887,13 +926,15 @@ class Messageable(metaclass=abc.ABCMeta):
 
             try:
                 data = await state.http.send_files(channel.id, files=files, content=content, tts=tts,
-                                                   embed=embed, nonce=nonce, allowed_mentions=allowed_mentions)
+                                                   embed=embed, nonce=nonce, allowed_mentions=allowed_mentions,
+                                                   message_reference=reference)
             finally:
                 for f in files:
                     f.close()
         else:
             data = await state.http.send_message(channel.id, content, tts=tts, embed=embed,
-                                                                      nonce=nonce, allowed_mentions=allowed_mentions)
+                                                                      nonce=nonce, allowed_mentions=allowed_mentions,
+                                                                      message_reference=reference)
 
         ret = state.create_message(channel=channel, data=data)
         if delete_after is not None:
@@ -1045,7 +1086,6 @@ class Messageable(metaclass=abc.ABCMeta):
         """
         return HistoryIterator(self, limit=limit, before=before, after=after, around=around, oldest_first=oldest_first)
 
-
 class Connectable(metaclass=abc.ABCMeta):
     """An ABC that details the common operations on a channel that can
     connect to a voice server.
@@ -1064,7 +1104,7 @@ class Connectable(metaclass=abc.ABCMeta):
     def _get_voice_state_pair(self):
         raise NotImplementedError
 
-    async def connect(self, *, timeout=60.0, reconnect=True):
+    async def connect(self, *, timeout=60.0, reconnect=True, cls=VoiceClient):
         """|coro|
 
         Connects to voice and creates a :class:`VoiceClient` to establish
@@ -1078,6 +1118,9 @@ class Connectable(metaclass=abc.ABCMeta):
             Whether the bot should automatically attempt
             a reconnect if a part of the handshake fails
             or the gateway goes down.
+        cls: Type[:class:`VoiceProtocol`]
+            A type that subclasses :class:`~discord.VoiceProtocol` to connect with.
+            Defaults to :class:`~discord.VoiceClient`.
 
         Raises
         -------
@@ -1090,20 +1133,25 @@ class Connectable(metaclass=abc.ABCMeta):
 
         Returns
         --------
-        :class:`~discord.VoiceClient`
+        :class:`~discord.VoiceProtocol`
             A voice client that is fully connected to the voice server.
         """
+
+        if not issubclass(cls, VoiceProtocol):
+            raise TypeError('Type must meet VoiceProtocol abstract base class.')
+
         key_id, _ = self._get_voice_client_key()
         state = self._state
 
         if state._get_voice_client(key_id):
             raise ClientException('Already connected to a voice channel.')
 
-        voice = VoiceClient(state=state, timeout=timeout, channel=self)
+        client = state._get_client()
+        voice = cls(client, self)
         state._add_voice_client(key_id, voice)
 
         try:
-            await voice.connect(reconnect=reconnect)
+            await voice.connect(timeout=timeout, reconnect=reconnect)
         except asyncio.TimeoutError:
             try:
                 await voice.disconnect(force=True)
