@@ -3,7 +3,7 @@
 """
 The MIT License (MIT)
 
-Copyright (c) 2015-2020 Rapptz
+Copyright (c) 2015-present Rapptz
 
 Permission is hereby granted, free of charge, to any person obtaining a
 copy of this software and associated documentation files (the "Software"),
@@ -37,8 +37,10 @@ __all__ = (
     'MemberConverter',
     'UserConverter',
     'MessageConverter',
+    'PartialMessageConverter',
     'TextChannelConverter',
     'InviteConverter',
+    'GuildConverter',
     'RoleConverter',
     'GameConverter',
     'ColourConverter',
@@ -251,7 +253,38 @@ class UserConverter(IDConverter):
 
         return result
 
-class MessageConverter(Converter):
+class PartialMessageConverter(Converter):
+    """Converts to a :class:`discord.PartialMessage`.
+
+    .. versionadded:: 1.7
+
+    The creation strategy is as follows (in order):
+
+    1. By "{channel ID}-{message ID}" (retrieved by shift-clicking on "Copy ID")
+    2. By message ID (The message is assumed to be in the context channel.)
+    3. By message URL
+    """
+    def _get_id_matches(self, argument):
+        id_regex = re.compile(r'(?:(?P<channel_id>[0-9]{15,21})-)?(?P<message_id>[0-9]{15,21})$')
+        link_regex = re.compile(
+            r'https?://(?:(ptb|canary|www)\.)?discord(?:app)?\.com/channels/'
+            r'(?:[0-9]{15,21}|@me)'
+            r'/(?P<channel_id>[0-9]{15,21})/(?P<message_id>[0-9]{15,21})/?$'
+        )
+        match = id_regex.match(argument) or link_regex.match(argument)
+        if not match:
+            raise MessageNotFound(argument)
+        channel_id = match.group("channel_id")
+        return int(match.group("message_id")), int(channel_id) if channel_id else None
+
+    async def convert(self, ctx, argument):
+        message_id, channel_id = self._get_id_matches(argument)
+        channel = ctx.bot.get_channel(channel_id) if channel_id else ctx.channel
+        if not channel:
+            raise ChannelNotFound(channel_id)
+        return discord.PartialMessage(channel=channel, id=message_id)
+
+class MessageConverter(PartialMessageConverter):
     """Converts to a :class:`discord.Message`.
 
     .. versionadded:: 1.1
@@ -263,24 +296,14 @@ class MessageConverter(Converter):
     3. Lookup by message URL
 
     .. versionchanged:: 1.5
-         Raise :exc:`.ChannelNotFound`, `MessageNotFound` or `ChannelNotReadable` instead of generic :exc:`.BadArgument`
+         Raise :exc:`.ChannelNotFound`, :exc:`.MessageNotFound` or :exc:`.ChannelNotReadable` instead of generic :exc:`.BadArgument`
     """
     async def convert(self, ctx, argument):
-        id_regex = re.compile(r'(?:(?P<channel_id>[0-9]{15,21})-)?(?P<message_id>[0-9]{15,21})$')
-        link_regex = re.compile(
-            r'https?://(?:(ptb|canary|www)\.)?discord(?:app)?\.com/channels/'
-            r'(?:[0-9]{15,21}|@me)'
-            r'/(?P<channel_id>[0-9]{15,21})/(?P<message_id>[0-9]{15,21})/?$'
-        )
-        match = id_regex.match(argument) or link_regex.match(argument)
-        if not match:
-            raise MessageNotFound(argument)
-        message_id = int(match.group("message_id"))
-        channel_id = match.group("channel_id")
+        message_id, channel_id = self._get_id_matches(argument)
         message = ctx.bot._connection._get_message(message_id)
         if message:
             return message
-        channel = ctx.bot.get_channel(int(channel_id)) if channel_id else ctx.channel
+        channel = ctx.bot.get_channel(channel_id) if channel_id else ctx.channel
         if not channel:
             raise ChannelNotFound(channel_id)
         try:
@@ -426,29 +449,76 @@ class ColourConverter(Converter):
     - ``0x<hex>``
     - ``#<hex>``
     - ``0x#<hex>``
+    - ``rgb(<number>, <number>, <number>)``
     - Any of the ``classmethod`` in :class:`Colour`
 
         - The ``_`` in the name can be optionally replaced with spaces.
 
+    Like CSS, ``<number>`` can be either 0-255 or 0-100% and ``<hex>`` can be
+    either a 6 digit hex number or a 3 digit hex shortcut (e.g. #fff).
+
     .. versionchanged:: 1.5
          Raise :exc:`.BadColourArgument` instead of generic :exc:`.BadArgument`
-    """
-    async def convert(self, ctx, argument):
-        arg = argument.replace('0x', '').lower()
 
-        if arg[0] == '#':
-            arg = arg[1:]
+    .. versionchanged:: 1.7
+        Added support for ``rgb`` function and 3-digit hex shortcuts
+    """
+
+    RGB_REGEX = re.compile(r'rgb\s*\((?P<r>[0-9]{1,3}%?)\s*,\s*(?P<g>[0-9]{1,3}%?)\s*,\s*(?P<b>[0-9]{1,3}%?)\s*\)')
+
+    def parse_hex_number(self, argument):
+        arg = ''.join(i * 2 for i in argument) if len(argument) == 3 else argument
         try:
             value = int(arg, base=16)
             if not (0 <= value <= 0xFFFFFF):
-                raise BadColourArgument(arg)
-            return discord.Colour(value=value)
+                raise BadColourArgument(argument)
         except ValueError:
-            arg = arg.replace(' ', '_')
-            method = getattr(discord.Colour, arg, None)
-            if arg.startswith('from_') or method is None or not inspect.ismethod(method):
-                raise BadColourArgument(arg)
-            return method()
+            raise BadColourArgument(argument)
+        else:
+            return discord.Color(value=value)
+
+    def parse_rgb_number(self, argument, number):
+        if number[-1] == '%':
+            value = int(number[:-1])
+            if not (0 <= value <= 100):
+                raise BadColourArgument(argument)
+            return round(255 * (value / 100))
+
+        value = int(number)
+        if not (0 <= value <= 255):
+            raise BadColourArgument(argument)
+        return value
+
+    def parse_rgb(self, argument, *, regex=RGB_REGEX):
+        match = regex.match(argument)
+        if match is None:
+            raise BadColourArgument(argument)
+
+        red = self.parse_rgb_number(argument, match.group('r'))
+        green = self.parse_rgb_number(argument, match.group('g'))
+        blue = self.parse_rgb_number(argument, match.group('b'))
+        return discord.Color.from_rgb(red, green, blue)
+
+    async def convert(self, ctx, argument):
+        if argument[0] == '#':
+            return self.parse_hex_number(argument[1:])
+
+        if argument[0:2] == '0x':
+            rest = argument[2:]
+            # Legacy backwards compatible syntax
+            if rest.startswith('#'):
+                return self.parse_hex_number(rest[1:])
+            return self.parse_hex_number(rest)
+
+        arg = argument.lower()
+        if arg[0:3] == 'rgb':
+            return self.parse_rgb(arg)
+
+        arg = arg.replace(' ', '_')
+        method = getattr(discord.Colour, arg, None)
+        if arg.startswith('from_') or method is None or not inspect.ismethod(method):
+            raise BadColourArgument(arg)
+        return method()
 
 ColorConverter = ColourConverter
 
@@ -501,6 +571,32 @@ class InviteConverter(Converter):
             return invite
         except Exception as exc:
             raise BadInviteArgument() from exc
+
+class GuildConverter(IDConverter):
+    """Converts to a :class:`~discord.Guild`.
+
+    The lookup strategy is as follows (in order):
+
+    1. Lookup by ID.
+    2. Lookup by name. (There is no disambiguation for Guilds with multiple matching names).
+
+    .. versionadded:: 1.7
+    """
+
+    async def convert(self, ctx, argument):
+        match = self._get_id_match(argument)
+        result = None
+
+        if match is not None:
+            guild_id = int(match.group(1))
+            result = ctx.bot.get_guild(guild_id)
+
+        if result is None:
+            result = discord.utils.get(ctx.bot.guilds, name=argument)
+
+            if result is None:
+                raise GuildNotFound(argument)
+        return result
 
 class EmojiConverter(IDConverter):
     """Converts to a :class:`~discord.Emoji`.
